@@ -3,7 +3,7 @@
    CURRENT execution context's metadata (works on executor threads).
 
    Uniform cell model:
-   - every cell has a PUBLIC Spin in :registry  -> `lookup`     (used by `await`)
+   - every cell has a PUBLIC Spin in :registry -> `lookup`      (used by `await`)
    - literal cells also have an editable SignalRef in :vals -> `lookup-val`
      (used by the literal wrapper spin's `track`)."
   (:require [org.replikativ.spindel.engine.core :as ec]

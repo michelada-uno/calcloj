@@ -25,4 +25,10 @@
   ;; Step 0 spike — prove signal/spin lifecycle on real Spindel.
   :spike {:main-opts ["-m" "calcloj.spike"]}
   :spike0b {:main-opts ["-m" "calcloj.spike0b"]}
-  :web {:main-opts ["-m" "calcloj.web"]}}}
+  :web {:main-opts ["-m" "calcloj.web"]}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}}}

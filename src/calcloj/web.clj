@@ -38,12 +38,18 @@
   [a] (str "c_" (str/replace a ":" "_")))
 
 (defn- cell-input [sh a]
-  [:input
-   {:id (cell-id a)
-    :value (display sh a)
-    :data-on:change
-    (format "$cell='%s'; $v=el.value; @post('/cell')" a)
-    :style "width:7rem;border:1px solid #ddd;padding:2px 4px;font:13px monospace;"}])
+  (let [disp (display sh a)
+        raw  (or (sheet/raw sh a) disp)]      ; formula text or literal raw
+    [:input
+     {:id (cell-id a)
+      :value disp                              ; shows computed value...
+      :data-raw raw                            ; ...but focus reveals raw for editing
+      :data-val disp
+      :data-on:focus "el.value=el.dataset.raw"
+      :data-on:blur  "el.value=el.dataset.val"
+      :data-on:change
+      (format "$cell='%s'; $v=el.value; @post('/cell')" a)
+      :style "width:7rem;border:1px solid #ddd;padding:2px 4px;font:13px monospace;"}]))
 
 (defn- grid-rows [sh]
   (h/html
@@ -72,8 +78,9 @@
      [:body {:data-signals "{cell:'', v:''}"
              :style "font-family:sans-serif;padding:1rem;"}
       [:h2 "calcloj"]
-      [:p {:style "color:#666;"} "Edit a cell. Try a formula: "
-       [:code "=(+ #cell A:1 #cell B:1)"]]
+      [:p {:style "color:#666;"} "Edit a cell. Formula: "
+       [:code "=(+ #cell A1 #cell B1)"] " · range: "
+       [:code "=(reduce + #cells A1:A3)"] " · click a cell to edit its source."]
       [:table {:id "grid" :style "border-collapse:collapse;"}
        (grid-rows sh)]]])))
 

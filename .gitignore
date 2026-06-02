@@ -4,3 +4,5 @@
 .clj-kondo/.cache
 *.log
 .DS_Store
+/.clj-kondo/
+/.nrepl-port
