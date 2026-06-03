@@ -140,3 +140,21 @@
 (defn raw   [{:keys [meta]} addr] (get-in @meta [addr :raw]))
 (defn kind  [{:keys [meta]} addr] (get-in @meta [addr :kind]))
 (defn cells [{:keys [meta]}] (keys @meta))
+
+;; --- persistence (source, not runtime state) ---------------------------
+
+(defn document
+  "Serializable source of the sheet: {addr {:value raw}}. Per-cell PROPERTY map
+   — add :style/:format keys later (each a reactive property compiled from its
+   source). Runtime spins are rebuilt from this; we never serialize the graph."
+  [{:keys [meta]}]
+  (into {} (map (fn [[a m]] [a {:value (:raw m)}])) @meta))
+
+(defn load-document!
+  "Rebuild a sheet's cells from a document map. Order-independent: formula refs
+   resolve at run time, so a cell may load before its dependencies."
+  [sheet doc]
+  (doseq [[addr props] doc]
+    (when-let [raw (:value props)]
+      (set-cell! sheet addr raw)))
+  sheet)

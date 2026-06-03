@@ -17,7 +17,8 @@
             [hiccup2.core :as h]
             [jsonista.core :as json]
             [calcloj.addr :as addr]
-            [calcloj.sheet :as sheet]))
+            [calcloj.sheet :as sheet]
+            [calcloj.store :as store]))
 
 ;; --- geometry -----------------------------------------------------------
 
@@ -25,11 +26,18 @@
 (def ^:private RH 26)             ; cell height px
 (def ^:private GUT 48)            ; row-header gutter px
 (def ^:private HDR 26)            ; col-header height px
-(def ^:private TOTAL-COLS 1000)   ; logical sheet size
-(def ^:private TOTAL-ROWS 100000)
+(def ^:private MAX-COLS 16384)    ; hard cap for clamping jumps
+;; ~600k keeps the spacer div under Firefox's ~17.9M px element limit
+;; (600000 * 26 = 15.6M px). See TECHDEBT.md — the giant-spacer scroll model
+;; is the real ceiling; want a logical scrollbar that needs no huge div.
+(def ^:private MAX-ROWS 600000)
 (def ^:private WIN-COLS 16)       ; window size (+overscan)
 (def ^:private WIN-ROWS 34)
 (def ^:private OVER 2)            ; overscan cells
+(def ^:private MIN-COLS 26)       ; spacer never smaller than this
+(def ^:private MIN-ROWS 100)
+(def ^:private BUF-COLS 6)        ; scrollable buffer past used/visible range
+(def ^:private BUF-ROWS 30)
 
 (defn- xpos [ci] (+ GUT (* ci CW)))   ; cells/col-headers: left
 (defn- ypos [ri] (* ri RH))           ; cells/row-headers: top (col strip is separate)
@@ -39,14 +47,36 @@
   [r0 c0]
   (let [c0 (max 0 (- (long c0) OVER))
         r0 (max 0 (- (long r0) OVER))]
-    [(range c0 (min TOTAL-COLS (+ c0 WIN-COLS)))
-     (range r0 (min TOTAL-ROWS (+ r0 WIN-ROWS)))]))
+    [(range c0 (min MAX-COLS (+ c0 WIN-COLS)))
+     (range r0 (min MAX-ROWS (+ r0 WIN-ROWS)))]))
 
 ;; --- state --------------------------------------------------------------
 
-(defonce ^:private sheet* (atom nil))
-(defn- the-sheet [] (or @sheet* (reset! sheet* (sheet/create-sheet))))
+(defonce ^:private sheets* (atom {}))   ; id -> sheet (lazy: load from disk / create)
+(defn- sheet-for [id]
+  (let [id (if (store/valid-id? id) id "default")]
+    (or (@sheets* id)
+        (let [s (or (store/load-sheet id) (sheet/create-sheet))]
+          (swap! sheets* assoc id s)
+          s))))
 (defonce ^:private view* (atom {:r0 0 :c0 0}))
+(defonce ^:private dims* (atom nil))   ; last [w h] sent, to avoid resizing spacer needlessly
+
+(defn- used-max
+  "[max-ci max-ri] over non-empty cells (-1 if none)."
+  [sh]
+  (reduce (fn [[cm rm] a] (let [{:keys [ci ri]} (addr/parse a)]
+                            [(max cm ci) (max rm ri)]))
+          [-1 -1] (sheet/cells sh)))
+
+(defn- spacer-dims
+  "Spacer [w h] px: covers used range AND the current view, plus a buffer, so
+   the scrollbar extends just past real content but you can always scroll on."
+  [sh r0 c0]
+  (let [[cm rm] (used-max sh)
+        cols (min MAX-COLS (+ (max MIN-COLS (inc cm) (+ (long c0) WIN-COLS)) BUF-COLS))
+        rows (min MAX-ROWS (+ (max MIN-ROWS (inc rm) (+ (long r0) WIN-ROWS)) BUF-ROWS))]
+    [(+ GUT (* cols CW)) (* rows RH)]))
 
 (defn- in-window? [addr]
   (let [{:keys [ci ri]} (addr/parse addr)
@@ -93,42 +123,33 @@
                                 (ypos ri) GUT RH RH)}
            (inc ri)]))))
 
-(defn- grid-layers [sh]
+(defn- grid-layers
+  "Inner content of #scroll: sticky headers + a dynamically-sized spacer +
+   the visible window. Spacer grows with used range / view, not a fixed huge
+   sheet. Delegation handlers live on #scroll (parent), so re-rendering this
+   does not drop them."
+  [sh]
   (let [{:keys [r0 c0]} @view*
         [cis ris] (window r0 c0)
-        full-w (+ GUT (* TOTAL-COLS CW))]
+        [w h] (spacer-dims sh r0 c0)]
+    (reset! dims* [w h])
     (h/html
-     ;; sticky column-header strip (pins to top); contains the corner + labels
      [:div {:id "colstrip"
             :style (format (str "position:sticky;top:0;z-index:2;height:%dpx;width:%dpx;"
-                                "background:#f3f3f3;") HDR full-w)}
+                                "background:#f3f3f3;") HDR w)}
       [:div {:id "corner"
              :style (format (str "position:sticky;left:0;z-index:3;width:%dpx;height:%dpx;"
                                  "background:#e8e8e8;display:inline-block;") GUT HDR)}]
       [:div {:id "colhead"} (h/raw (colhead-html cis))]]
-     ;; body: full-height spacer for real scrollbar; row-header strip + cells
      [:div {:id "space"
-            :style (format "position:relative;width:%dpx;height:%dpx;"
-                           full-w (* TOTAL-ROWS RH))}
+            :style (format "position:relative;width:%dpx;height:%dpx;" w h)}
       [:div {:id "rowstrip"
              :style (format (str "position:sticky;left:0;z-index:1;width:%dpx;height:%dpx;"
-                                 "background:#f3f3f3;float:left;") GUT (* TOTAL-ROWS RH))}
+                                 "background:#f3f3f3;float:left;") GUT h)}
        [:div {:id "rowhead"} (h/raw (rowhead-html ris))]]
-      ;; event delegation: handlers live on #cells (persist across inner patches);
-      ;; focus/blur don't bubble -> use focusin/focusout. id "c_A1" -> addr slice(2).
-      [:div {:id "cells"
-             :data-on:focusin
-             (str "evt.target.classList.contains('cell') && "
-                  "($sel=evt.target.id.slice(2), $bar=evt.target.dataset.raw, "
-                  "evt.target.value=evt.target.dataset.raw)")
-             :data-on:focusout
-             "evt.target.classList.contains('cell') && (evt.target.value=evt.target.dataset.val)"
-             :data-on:change
-             (str "evt.target.classList.contains('cell') && "
-                  "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")}
-       (h/raw (cells-html sh cis ris))]])))
+      [:div {:id "cells"} (h/raw (cells-html sh cis ris))]])))
 
-(defn- page [sh]
+(defn- page [sh id]
   (str
    "<!doctype html>"
    (h/html
@@ -140,27 +161,46 @@
                                   "box-sizing:border-box;border:1px solid #ddd;"
                                   "padding:2px 4px;font:13px monospace;}")
                              (- CW 1) (- RH 1)))]
-      [:script {:type "module" :src "/datastar.js"}]]
-     [:body {:data-signals "{cell:'', v:'', err:'', sel:'', bar:'', r0:0, c0:0}"
+      [:script {:type "module" :src "/datastar.js"}]
+      [:script {:src "/app.js"}]]
+     [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', r0:0, c0:0, sheet:'%s'}" id)
              :style "font-family:sans-serif;margin:0;padding:.6rem;"}
       [:div {:id "toast" :data-show "$err != ''" :data-text "$err"
              :data-on:click "$err=''"
              :style (str "position:fixed;top:1rem;right:1rem;max-width:26rem;background:#c0392b;"
                          "color:#fff;padding:.6rem .9rem;border-radius:6px;font:13px sans-serif;"
                          "cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:20;")}]
-      ;; formula bar
+      ;; sheet switcher + address box (jump) + formula bar
       [:div {:style "display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;"}
-       [:strong {:style "min-width:3.5rem;font:13px monospace;"
-                 :data-text "$sel || '—'"}]
+       [:input {:id "sheetbox" :value id :placeholder "sheet"
+                :data-on:keydown "evt.key==='Enter' && (location.href='/?s='+el.value)"
+                :title "sheet id — Enter to open"
+                :style (str "width:7rem;font:13px sans-serif;padding:5px 6px;"
+                            "border:1px solid #bbb;border-radius:4px;background:#f6f6f6;")}]
+       [:input {:id "addrbox" :data-bind:sel "" :placeholder "A1"
+                :data-on:keydown "evt.key==='Enter' && jump($sel)"
+                :style (str "width:5rem;font:13px monospace;padding:5px 6px;text-align:center;"
+                            "border:1px solid #bbb;border-radius:4px;")}]
        [:input {:id "fbar" :data-bind:bar "" :placeholder "value or =formula"
                 :data-on:keydown "evt.key==='Enter' && ($cell=$sel, $v=$bar, @post('/cell'))"
                 :data-on:blur "$cell=$sel, $v=$bar, @post('/cell')"
                 :style (str "flex:1;font:13px monospace;padding:5px 8px;border:1px solid #bbb;"
                             "border-radius:4px;")}]]
-      ;; scroll viewport
+      ;; scroll viewport. Delegated cell handlers live here (parent of #cells)
+      ;; so re-rendering the grid inner keeps them. focus/blur use focusin/out.
       [:div {:id "scroll"
+             :data-cw CW :data-rh RH :data-gut GUT     ; geometry for /app.js
              :data-on:scroll__debounce.120ms
              (format "$r0=Math.floor(el.scrollTop/%d); $c0=Math.floor(el.scrollLeft/%d); @post('/view')" RH CW)
+             :data-on:focusin
+             (str "evt.target.classList.contains('cell') && "
+                  "($sel=evt.target.id.slice(2), $bar=evt.target.dataset.raw, "
+                  "evt.target.value=evt.target.dataset.raw)")
+             :data-on:focusout
+             "evt.target.classList.contains('cell') && (evt.target.value=evt.target.dataset.val)"
+             :data-on:change
+             (str "evt.target.classList.contains('cell') && "
+                  "($cell=evt.target.id.slice(2), $v=evt.target.value, $bar=$v, @post('/cell'))")
              :style "height:78vh;overflow:auto;border:1px solid #ccc;position:relative;"}
        (grid-layers sh)]]])))
 
@@ -206,13 +246,15 @@
       :else m)))
 
 (defn- handle-cell [req]
-  (let [sh (the-sheet)
-        {:keys [cell v]} (read-json req)]
+  (let [{:keys [cell v sheet]} (read-json req)
+        sid (if (store/valid-id? sheet) sheet "default")
+        sh  (sheet-for sid)]
     (if (addr/valid? cell)
       (locking edit-lock
         (try
           (sheet/set-cell! sh cell (str v))
           (sheet/settle! sh)
+          (store/save! sid sh)                    ; autosave (source document)
           (let [affected (cons cell (sort (sheet/dependents* sh cell)))
                 visible  (filter in-window? affected)   ; only patch on-screen
                 errs (keep (fn [a]
@@ -231,26 +273,39 @@
       (sse-response "\n"))))
 
 (defn- handle-view [req]
-  (let [sh (the-sheet)
-        {:keys [r0 c0]} (read-json req)
+  (let [{:keys [r0 c0 sheet]} (read-json req)
+        sh (sheet-for (if (store/valid-id? sheet) sheet "default"))
         r0 (max 0 (long (or r0 0)))
         c0 (max 0 (long (or c0 0)))]
     (reset! view* {:r0 r0 :c0 c0})
-    (let [[cis ris] (window r0 c0)]
-      (sse-response
-       (str (patch-inner "#cells"   (cells-html sh cis ris))
-            (patch-inner "#colhead" (colhead-html cis))
-            (patch-inner "#rowhead" (rowhead-html ris)))))))
+    (if (= @dims* (spacer-dims sh r0 c0))
+      ;; bounds unchanged: cheap inner patch of window + headers
+      (let [[cis ris] (window r0 c0)]
+        (sse-response
+         (str (patch-inner "#cells"   (cells-html sh cis ris))
+              (patch-inner "#colhead" (colhead-html cis))
+              (patch-inner "#rowhead" (rowhead-html ris)))))
+      ;; bounds grew (reached edge / jumped): re-render grid (resizes spacer).
+      ;; #scroll element + its delegated handlers persist.
+      (sse-response (patch-inner "#scroll" (str (grid-layers sh)))))))
 
 (defn- app [req]
   (case [(:request-method req) (:uri req)]
-    [:get "/"]            (do (reset! view* {:r0 0 :c0 0})  ; browser scroll starts at 0
-                              {:status 200 :headers {"Content-Type" "text/html"}
-                               :body (page (the-sheet))})
+    [:get "/"]            (let [sid (or (some->> (:query-string req)
+                                                 (re-find #"(?:^|&)s=([A-Za-z0-9_-]{1,64})")
+                                                 second)
+                                        "default")]
+                            (reset! view* {:r0 0 :c0 0})   ; browser scroll starts at 0
+                            {:status 200 :headers {"Content-Type" "text/html"}
+                             :body (page (sheet-for sid) sid)})
     [:get "/datastar.js"] (if-let [r (io/resource "public/datastar.js")]
                             {:status 200 :headers {"Content-Type" "text/javascript"}
                              :body (slurp r)}
                             {:status 404 :body "no datastar"})
+    [:get "/app.js"]      (if-let [r (io/resource "public/app.js")]
+                            {:status 200 :headers {"Content-Type" "text/javascript"}
+                             :body (slurp r)}
+                            {:status 404 :body "no app.js"})
     [:post "/cell"]       (handle-cell req)
     [:post "/view"]       (handle-view req)
     {:status 404 :body "not found"}))
