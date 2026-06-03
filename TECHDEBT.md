@@ -36,15 +36,22 @@ DONE: sessions now register on load (`/session/start`) and release on unload via
 (execution context closed, saved) when the last session leaves; viewport is
 per-session.
 
-REMAINING: `sendBeacon` only fires on *graceful* unload (tab close, navigate).
-A browser crash, killed process, or laptop sleep leaves an orphan session that
-pins its sheet forever. Add a backstop:
-- stamp each session with last-activity time (touch on /cell, /view);
-- a periodic sweep ends sessions idle past a TTL (and unloads their sheets).
+DONE (backstop): each session is stamped with :last-seen (touched on /cell,
+/view); a server-side sweep (every 60s) reaps sessions idle > 30 min and unloads
+their sheets — so crash/sleep, where the beacon never fires, no longer pins a
+sheet forever. A swept client transparently re-registers on its next action
+(ensure-session!). No client heartbeat.
+
+REMAINING (minor):
+- a sheet loaded by a bare GET / with no following /session/start (e.g. a probe)
+  has zero sessions and is never unloaded. Consider sweeping session-less sheets
+  too (carefully — avoid racing a load that is mid-handshake).
+- TTL/sweep interval are constants; move to config.
 
 NOTE: we dropped the persistent-SSE approach — http-kit does not fire an
-async-channel close on idle client disconnect without a write, so SSE-based
-lifecycle needed heartbeats. Beacon is simpler and reliable for the common case.
+async-channel close on idle client disconnect without a write (verified). A
+Netty-based adapter (Aleph) would detect *graceful* disconnects, but still not
+crash/sleep — the sweep is needed regardless, so beacon + sweep it is.
 
 The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
 any real deployment.

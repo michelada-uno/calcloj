@@ -62,9 +62,18 @@
           (swap! sheets* assoc id s)
           s))))
 
-;; Sessions: one per live SSE stream. Hold the sheet id + per-session viewport
-;; (view/dims) so concurrent clients on the same sheet keep independent scroll.
-(defonce ^:private sessions* (atom {}))  ; sid -> {:sheet id :view {:r0 :c0} :dims [w h]}
+;; Sessions: one per client. Hold the sheet id + per-session viewport (view/dims)
+;; so concurrent clients on the same sheet keep independent scroll. Each carries
+;; :last-seen (ms) — real activity (edits/scrolls) refreshes it; a server-side
+;; sweep reaps sessions idle past a TTL (the only way to handle crash/sleep,
+;; where the beacon never fires). No client heartbeat.
+(defonce ^:private sessions* (atom {}))  ; sid -> {:sheet :view :dims :last-seen}
+
+(def ^:private sid-re #"[A-Za-z0-9-]{1,64}")
+(def ^:private SESSION-TTL-MS (* 30 60 1000))   ; reap sessions idle > 30 min
+(def ^:private SWEEP-MS 60000)                  ; check once a minute
+
+(defn- now [] (System/currentTimeMillis))
 
 (defn- session-view [sid] (get-in @sessions* [sid :view] {:r0 0 :c0 0}))
 (defn- set-session-view! [sid v] (when (@sessions* sid) (swap! sessions* assoc-in [sid :view] v)))
@@ -83,6 +92,37 @@
       (store/save! sheet-id sh)
       (sheet/close! sh)
       (swap! sheets* dissoc sheet-id))))
+
+(defn- register-session! [sid sheet-id]
+  (sheet-for sheet-id)                    ; acquire (load) the sheet
+  (swap! sessions* assoc sid {:sheet sheet-id :view {:r0 0 :c0 0}
+                              :dims nil :last-seen (now)}))
+
+(defn- touch! [sid] (when (@sessions* sid) (swap! sessions* assoc-in [sid :last-seen] (now))))
+
+(defn- ensure-session!
+  "Lazily (re)register a session for an active request, then stamp it alive. A
+   client whose session was swept (crash/sleep TTL) transparently comes back."
+  [sid sheet-id]
+  (when (and sid (re-matches sid-re (str sid)))
+    (when-not (@sessions* sid) (register-session! sid sheet-id))
+    (touch! sid)))
+
+(defn- sweep! []
+  (let [cutoff (- (now) SESSION-TTL-MS)]
+    (doseq [[sid s] @sessions*]
+      (when (< (long (:last-seen s 0)) cutoff)
+        (swap! sessions* dissoc sid)
+        (unload-sheet! (:sheet s))))))
+
+(defonce ^:private sweeper* (atom nil))
+(defn- start-sweeper! []
+  (when-not @sweeper*
+    (let [pool (java.util.concurrent.Executors/newScheduledThreadPool 1)]
+      (reset! sweeper*
+              (.scheduleAtFixedRate
+               pool ^Runnable (fn [] (try (sweep!) (catch Throwable _)))
+               SWEEP-MS SWEEP-MS java.util.concurrent.TimeUnit/MILLISECONDS)))))
 
 (defn- used-max
   "[max-ci max-ri] over non-empty cells (-1 if none)."
@@ -266,6 +306,7 @@
   (let [{:keys [cell v sid] :as sig} (read-signals req)
         sheet-id (sheet-id-of sig)
         sh   (sheet-for sheet-id)
+        _    (ensure-session! sid sheet-id)     ; lazy re-register + keep alive
         view (session-view sid)]
     (sse req
       (fn [gen]
@@ -293,8 +334,10 @@
 
 (defn- handle-view [req]
   (let [{:keys [r0 c0 sid] :as sig} (read-signals req)
-        sh   (sheet-for (sheet-id-of sig))
+        sheet-id (sheet-id-of sig)
+        sh   (sheet-for sheet-id)
         view {:r0 (max 0 (long (or r0 0))) :c0 (max 0 (long (or c0 0)))}]
+    (ensure-session! sid sheet-id)            ; lazy re-register + keep alive
     (set-session-view! sid view)
     (sse req
       (fn [gen]
@@ -309,11 +352,9 @@
             (do (set-session-dims! sid new-dims)
                 (patch-inner! gen "#scroll" (str (grid-layers sh view))))))))))
 
-;; Session lifecycle via plain HTTP (no persistent SSE — http-kit won't fire a
-;; channel close on idle disconnect anyway). The client registers on load and,
-;; on page unload, fires navigator.sendBeacon to /session/end (reliable during
-;; unload). A valid session id is a uuid-ish token.
-(def ^:private sid-re #"[A-Za-z0-9-]{1,64}")
+;; Session lifecycle via plain HTTP. Client registers on load and, on page
+;; unload, fires navigator.sendBeacon to /session/end (reliable during unload).
+;; Crash/sleep — where the beacon never fires — is handled by the TTL sweep.
 
 (defn- body-json [req]
   (when-let [b (:body req)]
@@ -323,9 +364,7 @@
   (let [{:keys [sid sheet]} (body-json req)
         sheet-id (if (store/valid-id? sheet) sheet "default")]
     (when (and sid (re-matches sid-re (str sid)))
-      (swap! sessions* assoc sid
-             {:sheet sheet-id :view {:r0 0 :c0 0}
-              :dims (spacer-dims (sheet-for sheet-id) 0 0)}))
+      (register-session! sid sheet-id))
     {:status 204}))
 
 (defn- handle-session-end [req]
@@ -366,6 +405,7 @@
 
 (defn start! [& [port]]
   (when @server* (@server*))
+  (start-sweeper!)                          ; reap idle/orphan sessions
   (reset! server* (http/run-server #'app {:port (or port 8080)}))
   (println "calcloj on http://localhost:" (or port 8080)))
 
