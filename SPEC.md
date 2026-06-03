@@ -7,7 +7,8 @@ on load. Multiple clients edit one sheet live.
 
 ## Stack
 
-- Clojure 1.12, `org.replikativ/spindel` (git dep, sha pinned in `deps.edn`).
+- Clojure 1.12, `org.replikativ/spindel` `0.1.15` (Clojars release; was a git sha
+  pin, switched once the release caught up — see `deps.edn`).
 - `dev.data-star.clojure/sdk` + `http-kit` adapter `1.0.0-RC10`.
 - http-kit server, reitit not used (hand-rolled `case` router), hiccup2, jsonista.
 - `org.babashka/sci` available (sandbox option) — current formula sandbox is a
@@ -68,8 +69,9 @@ resolve cells):
 
 Reader tags:
 - `#cell A1` → current value of A1.
-- `#cells A1:A3` → vector of current values (row-major rectangle), for
-  `map`/`reduce`.
+- `#cells A1:A3` → vector of current values, for `map`/`reduce`. The range is any
+  inclusive **rectangle**, expanded **row-major** at read time: `A1:A3`→`[A1 A2
+  A3]` (column), `A1:C1`→`[A1 B1 C1]` (row), `A1:B2`→`[A1 B1 A2 B2]` (block).
 
 Pipeline (`formula`):
 1. `parse`: `clojure.edn/read-string` with custom readers (EDN blocks `#=` RCE).

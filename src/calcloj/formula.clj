@@ -1,7 +1,10 @@
 (ns calcloj.formula
   "Formula = restricted Clojure expression. Cell refs via reader tags:
      #cell  A1       -> current value of A1
-     #cells A1:A3    -> vector of current values [A1 A2 A3] (for map/reduce)
+     #cells A1:A3    -> vector of current values [A1 A2 A3]      (column)
+     #cells A1:C1    -> [A1 B1 C1]                               (row)
+     #cells A1:B2    -> [A1 B1 A2 B2]  ROW-MAJOR rectangle       (block)
+   Any inclusive rectangle works (for map/reduce); ranges expand at read time.
 
    Uniform model: every cell is a Spin, so refs use `await` (handles Spins).
    Two constraints shape compilation:
@@ -36,6 +39,7 @@
   {;; #cell A1 -> (::ref "A1")
    'cell  (fn [sym] (ref-marker (str sym)))
    ;; #cells A1:A3 -> (vector (::ref "A1") (::ref "A2") (::ref "A3"))
+   ;; #cells A1:C1 -> (vector (::ref "A1") (::ref "B1") (::ref "C1"))  (rectangle)
    'cells (fn [sym]
             (let [[a b] (str/split (str sym) #":")]
               (cons 'vector (map ref-marker (addr/range-cells a b)))))})
