@@ -185,8 +185,10 @@ that the client `translate`s.
     when focus moves to the formula bar. `SELA` tracks it; `selectCell` is driven
     by a delegated `focusin` on `#viewport` and by `jump`.
   - `.editing-local` — the cell being actively edited *right now* (its own input
-    focused, or the formula bar editing it); a stronger outline + fill. `EDITA`
-    tracks it via cell and `#fbar` focus listeners.
+    focused, or the formula bar editing it); an **animated "marching-ants"** blue
+    dashed border (four gradient edges whose `background-position` scrolls via the
+    `cc-ants` keyframes) plus a soft fill. `EDITA` tracks it via cell and `#fbar`
+    focus listeners. Honors `prefers-reduced-motion`.
 - **Presence**: each session has a deterministic `:color` (hashed sid) plus
   `:cursor` (the cell it is on) and `:editing` (the cell it is actively typing
   in, else nil). `app.js` POSTs plain JSON to `/presence` on cell focus (cursor),
