@@ -42,8 +42,7 @@ function initSession() {
   if (box) { box.value = sid; box.dispatchEvent(new Event('input', {bubbles: true})); }
   // open the persistent collaboration stream via Datastar (it processes the
   // pushed patches); $sid is now set so the trigger's URL picks it up.
-  const trig = document.getElementById('streamtrigger');
-  if (trig) trig.click();
+  openStream();
 
   window.addEventListener('pagehide', function () {
     try {
@@ -52,6 +51,37 @@ function initSession() {
     } catch (e) {}
   });
 }
+// --- collaboration stream open + reconnect ---------------------------------
+// Datastar's @get SSE does not reconnect indefinitely on its own. Re-open the
+// stream (server registers the session + re-stores its push generator) whenever
+// it ends or its retries are exhausted, with capped backoff. No heartbeat.
+let _streamTimer = null;
+let _streamAttempt = 0;
+
+function openStream() {
+  if (window.__unloading) return;
+  const trig = document.getElementById('streamtrigger');
+  if (trig) trig.click();
+}
+
+function scheduleReopen() {
+  if (window.__unloading || _streamTimer) return;
+  _streamAttempt += 1;
+  const delay = Math.min(30000, 1000 * Math.pow(2, _streamAttempt)); // 2s,4s,...,30s
+  _streamTimer = setTimeout(function () { _streamTimer = null; openStream(); }, delay);
+}
+
+document.addEventListener('datastar-fetch', function (e) {
+  const d = e.detail || {};
+  if (!d.el || d.el.id !== 'streamtrigger') return;
+  // 'started' = connected (reset backoff). Reopen on a clean end ('finished')
+  // or after Datastar exhausts its own retries ('retries-failed'); ignore plain
+  // 'error' so we don't race Datastar's built-in retry into duplicate streams.
+  if (d.type === 'started') { _streamAttempt = 0; }
+  else if (d.type === 'finished' || d.type === 'retries-failed') { scheduleReopen(); }
+});
+window.addEventListener('pagehide', function () { window.__unloading = true; });
+
 // fire after Datastar is ready so the $sid signal binding is live
 document.addEventListener('datastar-ready', initSession);
 

@@ -404,8 +404,14 @@
       {hk/on-open
        (fn [gen]
          (when (and sid (re-matches sid-re sid))
-           (register-session! sid sheet-id)
-           (swap! sessions* assoc-in [sid :gen] gen)))})))
+           ;; reconnect: keep the existing session's view/dims, just swap the
+           ;; (dead) generator for the new one. fresh connect: register.
+           (when-not (@sessions* sid) (register-session! sid sheet-id))
+           (swap! sessions* update sid assoc :gen gen)
+           (touch! sid)
+           ;; flush once so the client sees an established, open stream (an SSE
+           ;; that sends nothing looks "finished" -> client reconnect storm).
+           (try (d*/patch-signals! gen "{}") (catch Throwable _))))})))
 
 (defn- body-json [req]
   (when-let [b (:body req)]
