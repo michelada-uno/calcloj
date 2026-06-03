@@ -177,6 +177,31 @@ that the client `translate`s.
   capped backoff (reset on `started`). `/stream` on-open keeps an existing
   session's view and just swaps in the new generator.
 
+### Presence & edit locking
+
+- **Selection highlight** (`app.js`, client-only): the selected cell keeps a
+  `.sel` outline even when focus moves to the formula bar. `SELA` tracks the
+  selection; `selectCell` is driven by a delegated `focusin` on `#viewport` and
+  by `jump`. A `MutationObserver` on `#cells` re-applies `.sel` after every
+  re-render (scroll / edit / collaborator push).
+- **Presence**: each session has a deterministic `:color` (hashed sid) plus
+  `:cursor` (the cell it is on) and `:editing` (the cell it is actively typing
+  in, else nil). `app.js` POSTs plain JSON to `/presence` on cell focus (cursor),
+  first keystroke (editing=true), and blur (editing=false). The server renders a
+  per-session **`#peers` overlay** — markers positioned window-relative to *that*
+  viewer's view — and pushes it to every session on the sheet (`broadcast-
+  presence!`). The `#peers` layer translates with `#cells`. A non-editing marker
+  is `pointer-events:none` (just a cursor); an **editing** marker is
+  `pointer-events:auto` with a translucent fill, so it **covers and locks** the
+  cell beneath (you cannot focus it).
+- **Edit lock (server guard)**: `/cell` rejects a write when another session's
+  `:editing` equals the target cell (`locked-by-other?`) → `#ERR`-style toast
+  "cell is being edited by another collaborator". Belt-and-suspenders with the
+  client overlay lock.
+- Cursors refresh on `/presence`, on a viewer's `/view` (re-render `#peers` for
+  the new window), on `/stream` open (newcomer sees existing cursors), and on
+  `reap-session!` (departed cursor disappears).
+
 ## Tests
 
 `clojure -X:test` — `addr`, `engine` (literals, chains, ranges, formula-over-

@@ -79,8 +79,31 @@ reap-session! which close-sse!s the stored generator. No heartbeat.
 - **Editor double-path**: the editor still gets its patches from the one-shot
   `@post` response; peers get them via the stream. Could unify (everything via
   streams, `/cell` returns empty) once reconnect is solid.
-- **Conflict policy**: last-write-wins, no locking/merge. Fine for now; revisit
-  if simultaneous edits to the same cell matter.
+- **Conflict policy**: last-write-wins for distinct cells. Same-cell editing is
+  now guarded by presence locks (below); cross-cell merge is still absent.
 
 The `/debug` endpoint (session/sheet counts) is dev-only — gate or remove before
 any real deployment.
+
+## Presence & edit locking — follow-ups
+
+DONE: collaborator cursors + edit locks. Per-session :cursor/:editing broadcast
+to a #peers overlay; an editing peer's marker locks the cell (pointer-events +
+server-side locked-by-other? guard in /cell). Selection highlight decoupled from
+input focus (client .sel class, re-applied via MutationObserver).
+
+REMAINING:
+- **Stuck lock on crash mid-edit**: if a client sets :editing and then crashes
+  (no blur/commit, no beacon), the cell stays locked for that peer until the TTL
+  sweep (30 min) reaps the session. Mitigations to consider: a short per-edit
+  lock TTL (auto-expire :editing after N seconds of no refresh, with the client
+  re-asserting while focused), or clearing :editing on stream death.
+- **Formula-bar editing isn't a lock**: editing a cell through the wide formula
+  bar doesn't set :editing (only direct cell-input typing does), so it neither
+  locks nor shows "editing…" to peers. Acceptable for now; wire fbar focus/input
+  to presence if it matters.
+- **Presence chattiness**: every focus/blur/first-keystroke POSTs /presence and
+  re-broadcasts the whole #peers overlay to all sessions. Fine at small scale;
+  debounce / diff if sessions-per-sheet grows.
+- **No name/identity**: peers are shown by color + "•"/"editing…" only (no user
+  name). Add when there's an identity/auth layer.

@@ -83,6 +83,21 @@
 
 (defn- now [] (System/currentTimeMillis))
 
+;; Per-session presence: a stable color + the cell the user is on (:cursor) and,
+;; while actively typing, the cell they are editing (:editing -> locks it for
+;; others). Colors are assigned deterministically from the sid so a reconnect
+;; keeps the same color.
+(def ^:private palette
+  ["#e6194b" "#3cb44b" "#4363d8" "#f58231" "#911eb4"
+   "#008080" "#f032e6" "#9a6324" "#46827d" "#808000"])
+(defn- color-for [sid] (nth palette (mod (Math/abs (long (hash sid))) (count palette))))
+(defn- rgba [hex a]
+  (let [h (subs hex 1)]
+    (format "rgba(%d,%d,%d,%s)"
+            (Integer/parseInt (subs h 0 2) 16)
+            (Integer/parseInt (subs h 2 4) 16)
+            (Integer/parseInt (subs h 4 6) 16) a)))
+
 (defn- session-view [sid] (get-in @sessions* [sid :view] {:r0 0 :c0 0}))
 (defn- set-session-view! [sid v] (when (@sessions* sid) (swap! sessions* assoc-in [sid :view] v)))
 (defn- session-dims [sid] (get-in @sessions* [sid :dims]))
@@ -104,7 +119,8 @@
 (defn- register-session! [sid sheet-id]
   (sheet-for sheet-id)                    ; acquire (load) the sheet
   (swap! sessions* assoc sid {:sheet sheet-id :view {:r0 0 :c0 0}
-                              :dims nil :last-seen (now)}))
+                              :dims nil :last-seen (now)
+                              :color (color-for sid) :cursor nil :editing nil}))
 
 (defn- touch! [sid] (when (@sessions* sid) (swap! sessions* assoc-in [sid :last-seen] (now))))
 
@@ -116,14 +132,17 @@
     (when-not (@sessions* sid) (register-session! sid sheet-id))
     (touch! sid)))
 
-(declare close-gen!)
+(declare close-gen! broadcast-presence!)
 (defn- reap-session!
   "Drop a session: close its push stream and unload the sheet if it was last."
   [sid]
   (when-let [s (@sessions* sid)]
     (close-gen! s)
     (swap! sessions* dissoc sid)
-    (unload-sheet! (:sheet s))))
+    (unload-sheet! (:sheet s))
+    ;; the departed cursor must disappear from peers still on the sheet
+    (when (pos? (sessions-on (:sheet s)))
+      (broadcast-presence! (:sheet s)))))
 
 (defn- sweep! []
   (let [cutoff (- (now) SESSION-TTL-MS)]
@@ -258,7 +277,12 @@
       [:div {:id "cellclip" :style (format "%sleft:%dpx;top:%dpx;right:%dpx;bottom:%dpx;"
                                            clip GUT HDR BAR BAR)}
        [:div {:id "cells" :style "position:absolute;left:0;top:0;will-change:transform;"}
-        (h/raw (cells-html sh cis ris))]]
+        (h/raw (cells-html sh cis ris))]
+       ;; collaborator cursors / edit-locks; translated with #cells by /app.js.
+       ;; container ignores pointer events — only an editing marker re-enables
+       ;; them to block the cell beneath.
+       [:div {:id "peers" :style (str "position:absolute;left:0;top:0;z-index:3;"
+                                      "pointer-events:none;will-change:transform;")}]]
       ;; custom scrollbars
       [:div {:id "vbar" :style (format (str "position:absolute;right:0;top:%dpx;bottom:%dpx;width:%dpx;"
                                             "background:#f0f0f0;z-index:5;") HDR BAR BAR)}
@@ -277,7 +301,17 @@
       [:title "calcloj"]
       [:style (h/raw (format (str "input.cell{position:absolute;width:%dpx;height:%dpx;"
                                   "box-sizing:border-box;border:1px solid #ddd;"
-                                  "padding:2px 4px;font:13px monospace;}")
+                                  "padding:2px 4px;font:13px monospace;}"
+                                  ;; persistent selection (independent of focus)
+                                  "input.cell.sel{outline:2px solid #1a73e8;"
+                                  "outline-offset:-2px;z-index:2;}"
+                                  ;; collaborator cursor overlays
+                                  ".peer{position:absolute;box-sizing:border-box;"
+                                  "border:2px solid #888;border-radius:2px;}"
+                                  ".peer.editing{cursor:not-allowed;}"
+                                  ".peer .peertag{position:absolute;top:-15px;left:-2px;"
+                                  "font:10px/14px sans-serif;color:#fff;padding:0 4px;"
+                                  "border-radius:3px 3px 3px 0;white-space:nowrap;}")
                              (- CW 1) (- RH 1)))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
@@ -350,6 +384,7 @@
       (re-find #"unknown cell" m)      "reference to empty cell"
       (re-find #"disallowed symbol" m) "not allowed in a formula"
       (re-find #"circular" m)          "circular reference"
+      (re-find #"locked by another" m) "cell is being edited by another collaborator"
       :else m)))
 
 (defn- sheet-id-of [{:keys [sheet]}]
@@ -383,6 +418,53 @@
           (try (d*/lock-sse! (:gen s) (d*/patch-elements! (:gen s) (render-cells sh vis (:view s))))
                (catch Throwable _ (reap-session! sid))))))))
 
+;; --- presence (collaborator cursors + edit locks) ----------------------
+
+(defn- peer-marker
+  "Overlay div for one peer's cursor, positioned window-relative to `view`. An
+   editing peer's marker captures pointer events (locks the cell beneath)."
+  [view {:keys [cursor editing color]}]
+  (let [{:keys [ci ri]} (addr/parse cursor)
+        [cb rb] (view-base view)
+        editing? (= editing cursor)
+        base (format (str "left:%dpx;top:%dpx;width:%dpx;height:%dpx;border-color:%s;")
+                     (* (- ci cb) CW) (* (- ri rb) RH) (dec CW) (dec RH) color)]
+    (str (h/html
+          [:div {:class (str "peer" (when editing? " editing"))
+                 :style (if editing?
+                          (str base "background:" (rgba color "0.16")
+                               ";pointer-events:auto;cursor:not-allowed;")
+                          base)}
+           [:span {:class "peertag" :style (str "background:" color)}
+            (if editing? "editing…" "•")]]))))
+
+(defn- peers-html
+  "Overlay markers for every OTHER session whose cursor falls in viewer-sid's
+   window. Rendered relative to the viewer's own view so coords line up."
+  [viewer-sid sheet-id]
+  (let [view (session-view viewer-sid)]
+    (apply str
+           (for [[sid s] @sessions*
+                 :when (and (not= sid viewer-sid) (= sheet-id (:sheet s))
+                            (:cursor s) (in-window? view (:cursor s)))]
+             (peer-marker view s)))))
+
+(defn- broadcast-presence!
+  "Re-render the #peers overlay for every session on the sheet (each scoped to
+   its own view). Called whenever any cursor / editing state changes."
+  [sheet-id]
+  (doseq [[sid s] @sessions*]
+    (when (and (= sheet-id (:sheet s)) (:gen s))
+      (try (d*/lock-sse! (:gen s) (patch-inner! (:gen s) "#peers" (peers-html sid sheet-id)))
+           (catch Throwable _ (reap-session! sid))))))
+
+(defn- locked-by-other?
+  "Is `cell` currently being edited by some session other than `sid`?"
+  [sid sheet-id cell]
+  (boolean (some (fn [[k s]]
+                   (and (not= k sid) (= sheet-id (:sheet s)) (= (:editing s) cell)))
+                 @sessions*)))
+
 (defn- handle-cell [req]
   (let [{:keys [cell v sid] :as sig} (read-signals req)
         sheet-id (sheet-id-of sig)
@@ -394,6 +476,8 @@
         (when (addr/valid? cell)
           (locking edit-lock
             (try
+              (when (locked-by-other? sid sheet-id cell)
+                (throw (ex-info "locked by another collaborator" {:locked cell})))
               (sheet/set-cell! sh cell (str v))
               (sheet/settle! sh)
               (store/save! sheet-id sh)               ; autosave (source document)
@@ -428,7 +512,27 @@
           (patch-inner! gen "#cells"   (cells-html sh cis ris))
           (patch-inner! gen "#colhead" (colhead-html cis))
           (patch-inner! gen "#rowhead" (rowhead-html ris))
-          (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view))))))))  ; #meta by id
+          (d*/patch-elements! gen (meta-html sh (:r0 view) (:c0 view)))   ; #meta by id
+          ;; re-render peer cursors for the new window
+          (patch-inner! gen "#peers" (peers-html sid sheet-id)))))))
+
+(defn- body-json [req]
+  (when-let [b (:body req)]
+    (json/read-value (slurp b) json/keyword-keys-object-mapper)))
+
+(defn- handle-presence
+  "Plain-JSON POST from app.js: {sid sheet cell editing}. Updates this session's
+   cursor / editing cell and re-broadcasts the overlay to everyone on the sheet."
+  [req]
+  (let [{:keys [sid sheet cell editing]} (body-json req)
+        sheet-id (if (store/valid-id? sheet) sheet "default")]
+    (when (and sid (re-matches sid-re (str sid)))
+      (ensure-session! sid sheet-id)
+      (swap! sessions* update sid assoc
+             :cursor  (when (addr/valid? cell) cell)
+             :editing (when (and editing (addr/valid? cell)) cell))
+      (broadcast-presence! sheet-id))
+    {:status 204}))
 
 ;; Session lifecycle. The persistent /stream registers the session and stores
 ;; its push generator (server -> client collaboration channel). Cleanup never
@@ -454,11 +558,9 @@
            (touch! sid)
            ;; flush once so the client sees an established, open stream (an SSE
            ;; that sends nothing looks "finished" -> client reconnect storm).
-           (try (d*/patch-signals! gen "{}") (catch Throwable _))))})))
-
-(defn- body-json [req]
-  (when-let [b (:body req)]
-    (json/read-value (slurp b) json/keyword-keys-object-mapper)))
+           (try (d*/patch-signals! gen "{}") (catch Throwable _))
+           ;; show this newcomer the cursors already present (and vice versa)
+           (broadcast-presence! sheet-id)))})))
 
 (defn- handle-session-end [req]
   (let [{:keys [sid]} (body-json req)]
@@ -495,6 +597,7 @@
                                                  @sessions*)})}
     [:post "/cell"]       (handle-cell req)
     [:post "/view"]       (handle-view req)
+    [:post "/presence"]   (handle-presence req)
     {:status 404 :body "not found"}))
 
 (defonce ^:private server* (atom nil))

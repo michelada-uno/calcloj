@@ -31,6 +31,7 @@ function render() {
   // translate relative to the CONTENT base (cb,rb) -> always aligned to #cells
   const tx = m.cb * g.CW - SX, ty = m.rb * g.RH - SY;
   setT('cells', tx, ty);
+  setT('peers', tx, ty);     // collaborator overlay tracks the cell layer
   setT('colstrip', tx, 0);
   setT('rowstrip', 0, ty);
   thumb('vbar', 'vthumb', SY, m.th, true);
@@ -105,9 +106,70 @@ function jump(addr) {
   let ci = 0; for (const ch of m[1]) ci = ci * 26 + (ch.charCodeAt(0) - 64); ci -= 1;
   const ri = parseInt(m[2], 10) - 1;
   SX = ci * g.CW; SY = ri * g.RH;          // no clamp: /view extends totals to cover
+  selectCell(addr);
   render(); requestView(true);
 }
 window.jump = jump;
+
+// --- selection highlight (decoupled from input focus) ----------------------
+// The selected cell stays highlighted even when focus moves elsewhere (e.g. the
+// formula bar). Selection is client-only; we re-apply it after any re-render of
+// #cells (scroll, edit, collaborator push) via a MutationObserver.
+let SELA = null;
+
+function paintSel() {
+  document.querySelectorAll('input.cell.sel').forEach(function (e) { e.classList.remove('sel'); });
+  if (SELA) { const e = $('c_' + SELA); if (e) e.classList.add('sel'); }
+}
+
+function selectCell(addr) {
+  if (addr === SELA) return;
+  SELA = addr;
+  paintSel();
+  sendPresence(addr, false);
+}
+
+// --- presence (collaborator cursors + edit locks) --------------------------
+// Tell the server where this user is and whether they are actively editing, so
+// peers can render a cursor and lock the cell. Plain fetch (not Datastar) so we
+// control exactly when it fires.
+let _lastEditing = null;
+
+function sendPresence(cell, editing) {
+  if (!window.__sid || !cell) return;
+  const sheet = ($('sheetbox') || {}).value || 'default';
+  fetch('/presence', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, keepalive: true,
+    body: JSON.stringify({sid: window.__sid, sheet: sheet, cell: cell, editing: !!editing})
+  }).catch(function () {});
+}
+
+function initSelection() {
+  const v = $('viewport'); if (!v || v.__selInit) return;
+  v.__selInit = true;
+  // focusin a cell -> select it (cursor presence, not yet editing)
+  v.addEventListener('focusin', function (e) {
+    if (e.target.classList && e.target.classList.contains('cell')) {
+      selectCell(e.target.id.slice(2)); _lastEditing = null;
+    }
+  });
+  // first keystroke in a cell -> mark editing (locks it for peers)
+  v.addEventListener('input', function (e) {
+    if (e.target.classList && e.target.classList.contains('cell')) {
+      const a = e.target.id.slice(2);
+      if (_lastEditing !== a) { _lastEditing = a; sendPresence(a, true); }
+    }
+  });
+  // leaving the cell -> stop editing (cursor stays where it is)
+  v.addEventListener('focusout', function (e) {
+    if (e.target.classList && e.target.classList.contains('cell')) {
+      _lastEditing = null; sendPresence(e.target.id.slice(2), false);
+    }
+  });
+  // re-apply the selection class whenever #cells is re-rendered
+  const cells = $('cells');
+  if (cells) new MutationObserver(paintSel).observe(cells, {childList: true, subtree: true});
+}
 
 function initScroll() {
   const v = $('viewport'); if (!v || v.__scrollInit) return;
@@ -116,6 +178,7 @@ function initScroll() {
   dragThumb('vbar', 'vthumb', true);
   dragThumb('hbar', 'hthumb', false);
   window.addEventListener('resize', render);
+  initSelection();
   render();  // page already rendered the window at (0,0)
 }
 
