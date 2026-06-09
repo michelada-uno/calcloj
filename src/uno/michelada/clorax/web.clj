@@ -1,4 +1,4 @@
-(ns uno.michelada.calcloj.web
+(ns uno.michelada.clorax.web
   "Windowed spreadsheet grid over the sheet engine, driven by Datastar.
 
    Viewport: a scroll container holds a full-size spacer (real scrollbar for a
@@ -16,9 +16,9 @@
             [org.httpkit.server :as http]
             [hiccup2.core :as h]
             [jsonista.core :as json]
-            [uno.michelada.calcloj.addr :as addr]
-            [uno.michelada.calcloj.sheet :as sheet]
-            [uno.michelada.calcloj.store :as store]
+            [uno.michelada.clorax.addr :as addr]
+            [uno.michelada.clorax.sheet :as sheet]
+            [uno.michelada.clorax.store :as store]
             [starfederation.datastar.clojure.api :as d*]
             [starfederation.datastar.clojure.adapter.http-kit :as hk])
   (:gen-class))
@@ -310,46 +310,11 @@
     [:html
      [:head
       [:meta {:charset "utf-8"}]
-      [:title "calcloj"]
-      [:style (h/raw
-               (str
-                ;; cell sizing (geometry-driven -> format). Cells are DISPLAY
-                ;; divs; a single floating #editor input handles editing.
-                (format (str "div.cell{position:absolute;width:%dpx;height:%dpx;"
-                             "box-sizing:border-box;border:1px solid #ddd;background:#fff;"
-                             "padding:2px 4px;font:13px monospace;line-height:%dpx;"
-                             "overflow:hidden;white-space:nowrap;text-overflow:clip;"
-                             "cursor:cell;user-select:none;}"
-                             "#editor{position:absolute;width:%dpx;height:%dpx;"
-                             "box-sizing:border-box;border:2px solid #1a73e8;background:#fff;"
-                             "padding:1px 3px;font:13px monospace;z-index:6;display:none;}")
-                        (- CW 1) (- RH 1) (- RH 5) (- CW 1) (- RH 1))
-                ;; --- selection / editing OVERLAY (#self), server-rendered.
-                ;; literal % (gradients) -> kept outside the format call.
-                ;; calm "you are here" selection box
-                ".selfcell{position:absolute;box-sizing:border-box;pointer-events:none;"
-                "border:2px solid #7aa7f0;}"
-                ;; actively editing: animated 'marching ants' border (four gradient
-                ;; edges whose position scrolls). pointer-events stays none so the
-                ;; cell beneath is still typable.
-                ".selfcell.editing{border-color:transparent;"
-                "background-image:"
-                "linear-gradient(90deg,#1a73e8 50%,transparent 50%),"
-                "linear-gradient(90deg,#1a73e8 50%,transparent 50%),"
-                "linear-gradient(0deg,#1a73e8 50%,transparent 50%),"
-                "linear-gradient(0deg,#1a73e8 50%,transparent 50%);"
-                "background-repeat:repeat-x,repeat-x,repeat-y,repeat-y;"
-                "background-size:8px 2px,8px 2px,2px 8px,2px 8px;"
-                "background-position:0 0,0 100%,0 0,100% 0;"
-                "animation:cc-ants .6s infinite linear;}"
-                "@keyframes cc-ants{to{background-position:8px 0,-8px 100%,0 -8px,100% 8px;}}"
-                "@media(prefers-reduced-motion:reduce){.selfcell.editing{animation:none;}}"
-                ;; collaborator cursor overlays
-                ".peer{position:absolute;box-sizing:border-box;border:2px solid #888;border-radius:2px;}"
-                ".peer.editing{cursor:not-allowed;}"
-                ".peer .peertag{position:absolute;top:-15px;left:-2px;"
-                "font:10px/14px sans-serif;color:#fff;padding:0 4px;"
-                "border-radius:3px 3px 3px 0;white-space:nowrap;}"))]
+      [:title "Clorax"]
+      [:style (h/raw (format (str "input.cell{position:absolute;width:%dpx;height:%dpx;"
+                                  "box-sizing:border-box;border:1px solid #ddd;"
+                                  "padding:2px 4px;font:13px monospace;}")
+                             (- CW 1) (- RH 1)))]
       [:script {:type "module" :src "/datastar.js"}]
       [:script {:src "/app.js"}]]
      [:body {:data-signals (format "{cell:'', v:'', err:'', sel:'', bar:'', edit:false, r0:0, c0:0, sheet:'%s', sid:''}" id)
@@ -677,6 +642,6 @@
   (when @server* (@server*))
   (start-sweeper!)                          ; reap idle/orphan sessions
   (reset! server* (http/run-server #'app {:port (or port 8080)}))
-  (println "calcloj on http://localhost:" (or port 8080)))
+  (println "Clorax on http://localhost:" (or port 8080)))
 
 (defn -main [& _] (start!) @(promise))
